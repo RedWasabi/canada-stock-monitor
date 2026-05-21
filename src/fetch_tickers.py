@@ -1,137 +1,121 @@
 import os
 import json
 import requests
-import re
 
-def fetch_from_tradingview():
+# Fallback: top 100 S&P 500 blue-chip tickers if TradingView returns < 50 signals
+FALLBACK_TICKERS = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "BRK-B", "LLY", "AVGO",
+    "JPM", "TSLA", "UNH", "V", "XOM", "MA", "COST", "HD", "PG", "JNJ",
+    "ABBV", "BAC", "NFLX", "CRM", "CVX", "MRK", "KO", "AMD", "PEP", "TMO",
+    "ACN", "LIN", "ADBE", "MCD", "WMT", "CSCO", "ABT", "TXN", "NEE", "PM",
+    "IBM", "GE", "ISRG", "DHR", "CAT", "INTU", "SPGI", "RTX", "BKNG", "AMGN",
+    "HON", "GS", "VRTX", "PLD", "AMAT", "MS", "PANW", "QCOM", "T", "ELV",
+    "BX", "SYK", "AXP", "LRCX", "BSX", "GILD", "MDT", "ADI", "BLK", "TMUS",
+    "SBUX", "DE", "MMC", "PGR", "CI", "ETN", "NOW", "REGN", "MDLZ", "ZTS",
+    "TJX", "CME", "MO", "ADP", "SO", "DUK", "PH", "CL", "HUM", "MCK",
+    "WM", "FI", "AON", "EMR", "ITW", "CTAS", "GD", "KLAC", "COF", "NOC"
+]
+
+
+def fetch_active_tickers():
     """
-    Fetches the complete, up-to-date list of active US tickers (NYSE, NASDAQ, AMEX)
-    from TradingView. Filters to:
-      - Common stocks only (types: ["stock"])
-      - Average 30-day volume >= 1,000,000
-    Sorted by market cap descending.
+    Fetches a live list of ~300 US stocks that are showing active signals RIGHT NOW.
+
+    Uses TradingView Scanner API to pre-filter by:
+      Base filters (AND):
+        - NYSE / NASDAQ / AMEX exchanges only
+        - Common stocks only (no ETFs, preferred shares, warrants)
+        - 30-day average volume > 1,000,000 (liquid stocks only)
+        - Price > $1.00 (no sub-penny stocks)
+
+      Signal filters (OR — stock must match at least ONE):
+        - Relative Volume (10-day) > 1.5x  (unusual trading activity)
+        - Today's price change > +2.0%     (strong up move)
+        - Today's price change < -2.0%     (strong down move)
+        - RSI (14-day) > 65               (approaching overbought)
+        - RSI (14-day) < 35               (approaching oversold)
+
+    Returns the top 300 by relative volume (most active first).
+    Falls back to FALLBACK_TICKERS (top 100 S&P 500 blue-chips) if < 50 signals found.
     """
-    print("Attempting to fetch active, liquid US tickers from TradingView...")
+    print("Fetching active signal stocks from TradingView Scanner...")
     try:
         url = "https://scanner.tradingview.com/america/scan"
         payload = {
+            # Base filters — ALL must be true (AND logic)
             "filter": [
-                # Only NYSE, NASDAQ, AMEX exchanges
-                {"left": "exchange", "operation": "in_range", "right": ["NYSE", "NASDAQ", "AMEX"]},
-                # Minimum 30-day average volume of 1,000,000 — filters out penny/illiquid stocks
-                # NOTE: The correct operation for "greater than" is "greater" (not "egt" or "greater_or_equal")
-                {"left": "average_volume_30d_calc", "operation": "greater", "right": 1000000}
+                {"left": "exchange",               "operation": "in_range",  "right": ["NYSE", "NASDAQ", "AMEX"]},
+                {"left": "average_volume_30d_calc", "operation": "greater",   "right": 1000000},
+                {"left": "close",                  "operation": "greater",   "right": 1.0},
             ],
+            # Signal filters — at least ONE must match (OR logic via filter2)
+            "filter2": {
+                "operator": "or",
+                "operands": [
+                    {"operation": {"operator": "and", "operands": [
+                        {"expression": {"left": "relative_volume_10d_calc", "operation": "greater", "right": 1.5}}
+                    ]}},
+                    {"operation": {"operator": "and", "operands": [
+                        {"expression": {"left": "change", "operation": "greater", "right": 2.0}}
+                    ]}},
+                    {"operation": {"operator": "and", "operands": [
+                        {"expression": {"left": "change", "operation": "less", "right": -2.0}}
+                    ]}},
+                    {"operation": {"operator": "and", "operands": [
+                        {"expression": {"left": "RSI", "operation": "greater", "right": 65}}
+                    ]}},
+                    {"operation": {"operator": "and", "operands": [
+                        {"expression": {"left": "RSI", "operation": "less", "right": 35}}
+                    ]}},
+                ]
+            },
             "options": {"active_symbols_only": True},
             "markets": ["america"],
-            # types: ["stock"] filters to common stocks only — excludes ETFs, funds, warrants, preferred shares
+            # Common stocks only — excludes ETFs, mutual funds, warrants, preferred shares
             "symbols": {"query": {"types": ["stock"]}, "tickers": []},
-            "columns": ["name"],
-            "sort": {"sortBy": "market_cap_basic", "sortOrder": "desc"},
-            # Request up to 2000 — TradingView returns ~1973 matching stocks
-            "range": [0, 2000]
+            # Columns returned — used for sorting only; we discard metadata after extracting tickers
+            "columns": ["name", "relative_volume_10d_calc", "change", "RSI", "market_cap_basic"],
+            # Sort by relative volume descending — most actively traded stocks first
+            "sort": {"sortBy": "relative_volume_10d_calc", "sortOrder": "desc"},
+            # Get top 300 — hard cap to keep runtime fast
+            "range": [0, 300]
         }
-        response = requests.post(url, json=payload, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+
+        response = requests.post(
+            url,
+            json=payload,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15
+        )
+
         if response.status_code == 200:
             data = response.json()
             tickers = []
-            for item in data.get('data', []):
-                sym = item.get('d', [None])[0]
+            for item in data.get("data", []):
+                sym = item.get("d", [None])[0]
                 if not sym:
                     continue
                 sym = str(sym).strip()
 
-                # Skip preferred stocks and warrants — they contain "/" or spaces
-                # e.g. BAC/PK, WFC/PL, AXIA/P — Yahoo Finance cannot parse these
-                if '/' in sym or ' ' in sym:
+                # Skip preferred stocks / warrants that slipped through (contain "/" or spaces)
+                if "/" in sym or " " in sym:
                     continue
 
-                # Replace dots with hyphens for Yahoo Finance (e.g. BRK.B -> BRK-B)
-                sym_clean = sym.replace('.', '-')
+                # Replace dots with hyphens for Yahoo Finance (e.g. BRK.B → BRK-B)
+                sym_clean = sym.replace(".", "-")
                 tickers.append(sym_clean)
 
-            # Remove duplicates and sort alphabetically
-            tickers = sorted(list(set(tickers)))
-            print(f"Successfully fetched {len(tickers)} liquid US common stock tickers from TradingView.")
-            return tickers
-        else:
-            print(f"TradingView scanner API failed with status code: {response.status_code}. Response: {response.text[:200]}")
-    except Exception as e:
-        print(f"Error fetching US tickers from TradingView: {e}")
-    return None
-
-
-def fetch_from_wikipedia():
-    """
-    Falls back to scraping S&P 500 tickers from Wikipedia using regex.
-    Used only when TradingView API fails.
-    """
-    print("Falling back to scraping S&P 500 tickers from Wikipedia...")
-    tickers = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            # Locate the S&P 500 constituents table by its id
-            table_match = re.search(r'<table[^>]*id="constituents"[^>]*>(.*?)</table>', response.text, re.DOTALL)
-            if table_match:
-                table_content = table_match.group(1)
-                # Find all table rows
-                rows = re.findall(r'<tr>(.*?)</tr>', table_content, re.DOTALL)
-                for row in rows:
-                    cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
-                    if cells:
-                        # First cell is the ticker symbol
-                        symbol_cell = cells[0]
-                        # Extract text inside <a> tag if it exists
-                        sym_match = re.search(r'<a[^>]*>(.*?)</a>', symbol_cell)
-                        sym = sym_match.group(1) if sym_match else symbol_cell
-                        # Strip any remaining HTML tags
-                        sym = re.sub(r'<[^>]*>', '', sym).strip()
-                        # Valid ticker: uppercase letters only, max 5 chars
-                        if sym and sym.isupper() and len(sym) <= 5 and '/' not in sym:
-                            # Replace dots with hyphens for Yahoo Finance (e.g. BRK.B -> BRK-B)
-                            sym_clean = sym.replace('.', '-')
-                            tickers.append(sym_clean)
+            if len(tickers) >= 50:
+                print(f"TradingView returned {len(tickers)} active signal stocks.")
+                return tickers
             else:
-                print("Could not find the constituents table in Wikipedia HTML.")
+                print(f"TradingView returned only {len(tickers)} stocks (market may be closed/quiet). Using fallback blue-chip list.")
+                return FALLBACK_TICKERS
+
         else:
-            print(f"Failed to fetch Wikipedia page: status code {response.status_code}")
+            print(f"TradingView scanner failed (HTTP {response.status_code}). Using fallback list.")
+            return FALLBACK_TICKERS
+
     except Exception as e:
-        print(f"Error scraping Wikipedia S&P 500 table: {e}")
-
-    # Remove duplicates
-    tickers = sorted(list(set(tickers)))
-    print(f"Successfully scraped {len(tickers)} S&P 500 tickers from Wikipedia.")
-    return tickers
-
-
-def main():
-    print("Starting US stock ticker list updater...")
-
-    # 1. Try TradingView first (most accurate, gets top ~1973 liquid US common stock tickers)
-    tickers = fetch_from_tradingview()
-
-    # 2. Fallback to Wikipedia S&P 500 scraping
-    if not tickers or len(tickers) == 0:
-        tickers = fetch_from_wikipedia()
-
-    if tickers and len(tickers) > 0:
-        tickers_file = os.path.join("data", "tickers.json")
-        os.makedirs("data", exist_ok=True)
-
-        # Save to JSON
-        with open(tickers_file, "w") as f:
-            json.dump(tickers, f, indent=2)
-
-        print(f"Tickers updated successfully. Saved {len(tickers)} tickers to {tickers_file}")
-    else:
-        print("Error: Could not retrieve tickers from any source.")
-
-
-if __name__ == "__main__":
-    main()
+        print(f"Error fetching tickers from TradingView: {e}. Using fallback list.")
+        return FALLBACK_TICKERS
