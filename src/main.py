@@ -14,7 +14,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from gist_store import load_state, save_state
 from fetch_tickers import fetch_live_signals
 from analyze_market import analyze_stocks
-from generate_commentary import generate_report, generate_weekly_summary
+from generate_commentary import generate_report, generate_weekly_summary, generate_daily_close_summary
 from send_telegram import send_telegram_message
 
 # US Eastern Time zone
@@ -122,8 +122,8 @@ def main():
                 print("It's Friday — generating weekly summary...")
                 report_text = generate_weekly_summary(processed_stocks)
             else:
-                print("Generating market close summary...")
-                report_text = generate_report(processed_stocks[:20], anomalies, insufficient_stocks)
+                print("Generating daily market close summary & next-day forecast...")
+                report_text = generate_daily_close_summary(processed_stocks, anomalies, insufficient_stocks)
         else:
             report_text = "<b>🔔 Market Close</b>\n\nNo active signals detected today.\n\n<b>💤</b> The market is now closed."
 

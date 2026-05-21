@@ -200,44 +200,66 @@ def generate_weekly_summary(all_stocks):
     """
     Generates a Friday end-of-week / market-close summary using Groq.
     Called once when the market closes (first run after 4 PM ET).
+    This report wraps up the week's price action and forecasts the next week's outlook
+    using deep trend insights (persistence, volume trends, adjusted confidence).
     """
     client = _get_client()
     if not client:
         return generate_fallback_close_report(all_stocks)
 
-    top_movers = sorted(all_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:10]
+    # Take top 20 movers to provide comprehensive context
+    top_movers = all_stocks[:20]
 
     stock_lines = []
     for s in top_movers:
-        emoji = _conf_emoji(s["bullish_conf"])
+        vol_str     = _format_volume(s["current_volume"])
+        avg_vol_str = _format_volume(s["avg_volume"])
         stock_lines.append(
-            f"{emoji} {s['Ticker']}: Chg={s['pct_change']:+.2f}%, "
-            f"VolR={s['vol_ratio']:.1f}x, RSI={s['rsi']:.0f}, "
-            f"AI Conf={s['bullish_conf']}%, Signal={s['signal']}"
+            f"{s['Ticker']}: "
+            f"O={s['Open']:.2f} H={s['High']:.2f} L={s['Low']:.2f} C={s['Close']:.2f} | "
+            f"Chg={s['pct_change']:+.2f}% | "
+            f"Vol={vol_str} (Avg={avg_vol_str}) VolR={s['vol_ratio']:.1f}x | "
+            f"RSI={s['rsi']:.0f} | BB: price is {s['bb_label']} | "
+            f"AI Conf={s['bullish_conf']}% ({_conf_label(s['bullish_conf'])}) | "
+            f"Trend: Persist={s.get('persistence','1/1')} Price={s.get('price_trend','Neutral')} Vol={s.get('vol_trend','Neutral')} | "
+            f"Signal: {s['signal']}"
         )
     movers_str = "\n".join(stock_lines) if stock_lines else "No significant movers today."
 
     prompt = f"""
-You are a senior Wall Street market strategist writing a weekly wrap-up for a professional Telegram trading channel.
+You are a senior Wall Street market strategist writing a weekly wrap-up and next-week forecast for a professional Telegram trading channel.
 
-The US stock market has just closed for the week. Here are today's top active movers:
+The US stock market has just closed for the week. Below is the closing and trend data for the top active stocks:
+- **Persistence (e.g. 4/5)**: How consistently the ticker was flagged in scanning snapshots today.
+- **Price Trend (Continuation / Reversing)**: Directional intraday trend behavior.
+- **Vol Trend (Accelerating / Fading)**: Volume behavior towards the weekly close.
+- **AI Conf (0-100%)**: Pre-computed bullish confidence.
 
+=== WEEK'S MOVER DATA ===
 {movers_str}
 
-Write a concise weekly market close summary. Include:
+=== REPORT REQUIREMENTS ===
 
-1. Start with: <b>🔔 Weekly Market Close Summary</b>
-2. <b>📈 Top Movers Recap</b> — Key moves and their meaning. Use 🔥🚀🟢🟡🔴⛔ emojis next to each ticker.
-3. <b>🧭 Sector & Theme Analysis</b> — Dominant sector/macro theme today. Growth vs value? Risk-on or off?
-4. <b>📅 Next Week Outlook</b> — What to watch next week: macro events, earnings, key technical levels.
-5. End with: <b>💤 Market Status:</b> <i>The market is now closed. Monitoring resumes Monday at market open.</i>
+1. Start with: <b>🔔 Weekly Market Close Summary & Next-Week Forecast</b>
 
-Formatting rules:
+2. <b>📈 Weekly Movers Recap</b>:
+   Summarize the most significant moves of the week. Highlight the key drivers behind the volume spikes and price extensions.
+
+3. <b>🔮 Deep Insight: Next-Week Outlook</b>:
+   Select 3-5 of the top movers and analyze their charts based on today's candle close and accumulated trends. Provide a clear, actionable forecast for their price action next week (e.g., Bullish Continuation, Support Retest, Pullback/Reversal, Consolidation).
+   Use emojis next to each ticker: 📈 (Bullish), 📉 (Bearish), or 👀 (Watch).
+
+4. <b>🧭 Macro & Sector Sentiment</b>:
+   What sector or theme dominated the week? What is the prevailing market sentiment (risk-on/risk-off) going into next week's open?
+
+5. End with: <b>💤 Market Status:</b> <i>The market is now closed for the weekend. Monitoring resumes Monday at market open.</i>
+
+=== FORMATTING RULES ===
 - Use ONLY Telegram HTML: <b>, <i>, <pre>, <code>
-- Use emojis generously — they make it easy to skim
+- Use emojis generously to make it easy to skim
 - No markdown, no <table> tags
-- Under 500 words
-- Start directly with the report
+- Under 600 words
+- Start directly with the report, no preamble
 """
 
     try:
@@ -245,13 +267,13 @@ Formatting rules:
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a professional market strategist writing a weekly market close report for a Telegram trading channel. Use Telegram HTML and emojis for maximum readability."
+                    "content": "You are a professional market strategist writing a weekly market close report and next-week outlook for a Telegram channel. Use Telegram HTML and emojis."
                 },
                 {"role": "user", "content": prompt}
             ],
             model="llama-3.3-70b-versatile",
             temperature=0.3,
-            max_tokens=1024
+            max_tokens=1536
         )
 
         groq_report = response.choices[0].message.content
@@ -261,6 +283,125 @@ Formatting rules:
     except Exception as e:
         print(f"Error calling Groq for weekly summary: {e}")
         return generate_fallback_close_report(all_stocks)
+
+
+def generate_daily_close_summary(all_stocks, anomalies, insufficient_stocks):
+    """
+    Generates a Monday-Thursday end-of-day market-close summary using Groq.
+    This report contains today's market wrap-up and a detailed, data-driven
+    forecast for the next day's trading session using accumulated intraday trend metrics.
+    """
+    client = _get_client()
+    if not client:
+        return generate_fallback_daily_close_report(all_stocks, anomalies, insufficient_stocks)
+
+    # Top 20 stocks by volume ratio or price change
+    top_stocks = all_stocks[:20]
+
+    stock_lines = []
+    for s in top_stocks:
+        vol_str     = _format_volume(s["current_volume"])
+        avg_vol_str = _format_volume(s["avg_volume"])
+        stock_lines.append(
+            f"{s['Ticker']}: "
+            f"O={s['Open']:.2f} H={s['High']:.2f} L={s['Low']:.2f} C={s['Close']:.2f} | "
+            f"Chg={s['pct_change']:+.2f}% | "
+            f"Vol={vol_str} (Avg={avg_vol_str}) VolR={s['vol_ratio']:.1f}x | "
+            f"RSI={s['rsi']:.0f} | BB: price is {s['bb_label']} | "
+            f"AI Conf={s['bullish_conf']}% ({_conf_label(s['bullish_conf'])}) | "
+            f"Trend: Persist={s.get('persistence','1/1')} Price={s.get('price_trend','Neutral')} Vol={s.get('vol_trend','Neutral')} | "
+            f"Signal: {s['signal']}"
+        )
+    stock_data_str = "\n".join(stock_lines)
+
+    anomalies_str = "\n".join(
+        [f"  {a['Ticker']}: Chg={a['pct_change']:+.2f}%, VolR={a['vol_ratio']:.1f}x, Conf={a['bullish_conf']}%"
+         for a in anomalies]
+    ) if anomalies else "  None"
+
+    insufficient_str = ", ".join(insufficient_stocks) if insufficient_stocks else "None"
+
+    prompt = f"""
+You are a senior Wall Street quantitative strategist writing a daily close report and next-day forecast for a professional Telegram trading channel.
+
+Today's trading session has just concluded. Below is the final data for the most active stocks, including accumulated trend indicators from snapshot checks conducted throughout the day:
+- **Persistence (e.g. 4/5)**: How consistently the ticker was flagged in scanning snapshots today. Higher persistence indicates sustained buying/selling pressure.
+- **Price Trend (Continuation / Reversing)**: Indicates whether price action was consistently building higher highs or reversing throughout the session.
+- **Vol Trend (Accelerating / Fading)**: Indicates whether institutional volume was building up or tapering off into the close.
+- **AI Conf (0-100%)**: Pre-computed bullish confidence adjusted by persistence and trend factors.
+
+=== TODAY'S CLOSING STOCK DATA (Top 20 by activity) ===
+{stock_data_str}
+
+=== ANOMALIES (Price move >5% but NO volume spike) ===
+{anomalies_str}
+
+=== INSUFFICIENT DATA ===
+{insufficient_str}
+
+=== REPORT REQUIREMENTS ===
+
+1. Start with: <b>🔔 US DAILY MARKET CLOSE & NEXT-DAY FORECAST</b>
+
+2. <b>Stock Table</b> in a <pre>...</pre> block. Use EXACTLY this format (59 chars wide):
+Ticker | Price   | Chg%  | VolR | RSI | Conf | Signal
+-----------------------------------------------------------
+Each row:
+  - Ticker: 6 chars, left-aligned
+  - Price: 7 chars, right, 2 decimal places
+  - Chg%: 6 chars, right, 1dp with sign (e.g. +12.4%)
+  - VolR: 5 chars, right, 1dp + "x" (e.g.  3.4x)
+  - RSI: 3 chars, right, integer
+  - Conf: 4 chars, right, integer + "%" (e.g.  72%)
+  - Signal: 13 chars, left
+
+3. <b>🔮 Deep Insight: Next-Day Price Action Forecast</b>:
+   Select the 3-5 most compelling setups based on persistence, volume trends, and candle structures. For each:
+   - Provide a precise next-day outlook (e.g., Continuation, Breakout, Pullback, or Reversal).
+   - Use the candle shape (Open, High, Low, Close relation) and Volume Trend to justify the forecast.
+   - Use emojis next to each ticker to indicate the directional bias: 📈 (Bullish Continuation), 📉 (Bearish Extension/Pullback), or 👀 (Watch/Consolidation).
+
+4. <b>⚠️ Anomalies & Key Risks</b>:
+   Comment briefly on any key stock anomalies or risk factors to watch.
+
+5. <b>🌡️ Closing Market Pulse</b>:
+   Synthesize the overall market tone. What does today's close suggest about the opening direction for tomorrow's session?
+
+=== FORMATTING RULES ===
+- Use ONLY Telegram HTML: <b>, <i>, <pre>, <code>, <a href="">
+- NO markdown, NO <table>, NO <h1>, NO <h2>
+- Emojis are welcome throughout — they help readability
+- Keep the full report 500–700 words
+- Start directly with the report, no preamble
+"""
+
+    try:
+        response = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior quantitative strategist writing a daily close market report "
+                        "and next-day forecast for a Telegram trading channel. Provide high-density, "
+                        "professional analysis. Format output strictly in Telegram HTML."
+                    )
+                },
+                {"role": "user", "content": prompt}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.25,
+            max_tokens=1536
+        )
+        groq_report = response.choices[0].message.content
+
+        # Prepend the emoji Quick Snapshot for instant skimming
+        top_by_vol = sorted(all_stocks, key=lambda x: x["vol_ratio"], reverse=True)
+        snapshot   = _build_snapshot(top_by_vol, n=6)
+        return snapshot + "\n\n" + groq_report
+
+    except Exception as e:
+        print(f"Error calling Groq for daily close summary: {e}")
+        return generate_fallback_daily_close_report(all_stocks, anomalies, insufficient_stocks)
 
 
 def generate_fallback_report(top_stocks, anomalies, insufficient_stocks):
@@ -306,13 +447,41 @@ def generate_fallback_report(top_stocks, anomalies, insufficient_stocks):
     return report
 
 
+def generate_fallback_daily_close_report(all_stocks, anomalies, insufficient_stocks):
+    """Fallback daily close report if Groq is unavailable."""
+    top_by_vol = sorted(all_stocks, key=lambda x: x["vol_ratio"], reverse=True)
+    snapshot = _build_snapshot(top_by_vol, n=6)
+
+    report  = "<b>🔔 US DAILY MARKET CLOSE & NEXT-DAY FORECAST</b>\n\n"
+    report += snapshot + "\n\n"
+    
+    report += "<pre>"
+    report += f"{'Ticker':<6} | {'Price':>7} | {'Chg%':>6} | {'VolR':>5} | {'RSI':>3} | {'Conf':>4} | {'Signal':<13}\n"
+    report += "-" * 61 + "\n"
+
+    for s in all_stocks[:20]:
+        chg_str  = f"{s['pct_change']:+.1f}%"
+        vol_str  = f"{s['vol_ratio']:.1f}x"
+        rsi_val  = int(round(s["rsi"]))
+        conf_str = f"{s['bullish_conf']}%"
+        sig_str  = s["signal"][:13]
+        report  += (
+            f"{s['Ticker']:<6} | {s['Close']:>7.2f} | {chg_str:>6} | "
+            f"{vol_str:>5} | {rsi_val:>3} | {conf_str:>4} | {sig_str:<13}\n"
+        )
+    report += "</pre>\n\n"
+
+    report += "<b>💡 Note:</b> <i>Groq API unavailable — daily close fallback table shown. Price monitoring resumes tomorrow at market open.</i>\n"
+    return report
+
+
 def generate_fallback_close_report(all_stocks):
     """Fallback close summary when Groq is unavailable."""
     top = sorted(all_stocks, key=lambda x: x["vol_ratio"], reverse=True)[:5]
     snapshot = _build_snapshot(top, n=5)
 
-    report  = "<b>🔔 Market Close Summary</b>\n\n"
+    report  = "<b>🔔 Weekly Market Close Summary & Next-Week Forecast</b>\n\n"
     report += snapshot + "\n\n"
     report += "<b>💤 Market Status:</b>\n"
-    report += "<i>The market is now closed. Monitoring resumes Monday at market open.</i>\n"
+    report += "<i>The market is now closed for the weekend. Monitoring resumes Monday at market open.</i>\n"
     return report
