@@ -41,6 +41,11 @@ def analyze_stocks(tickers):
             # Clean up missing rows
             df = df.dropna(subset=['Close', 'Volume'])
             
+            # If the stock has no data at all, it is likely delisted or invalid.
+            # We skip it entirely to keep the report clean.
+            if len(df) == 0:
+                continue
+
             # Check for insufficient data
             # We need at least 21 days: 20 days for the volume moving average, 
             # and today's data to compare.
