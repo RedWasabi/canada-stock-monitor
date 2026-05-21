@@ -54,6 +54,45 @@ def fetch_from_cad_tickers():
         print(f"Could not fetch tickers using cad_tickers package: {e}")
     return None
 
+def fetch_from_tradingview():
+    """
+    Fetches the complete, up-to-date list of active TSX tickers from TradingView.
+    """
+    print("Attempting to fetch active TSX tickers from TradingView...")
+    try:
+        url = "https://scanner.tradingview.com/canada/scan"
+        payload = {
+            "filter": [
+                {"left": "exchange", "operation": "in_range", "right": ["TSX"]}
+            ],
+            "options": {"active_symbols_only": True},
+            "markets": ["canada"],
+            "symbols": {"query": {"types": []}, "tickers": []},
+            "columns": ["name"],
+            "sort": {"sortBy": "name", "sortOrder": "asc"},
+            "range": [0, 4000]
+        }
+        response = requests.post(url, json=payload, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            tickers = []
+            for item in data.get('data', []):
+                sym = item.get('d', [None])[0]
+                if sym:
+                    # Clean the ticker for Yahoo Finance (dots to hyphens)
+                    sym_clean = str(sym).strip().replace('.', '-')
+                    tickers.append(f"{sym_clean}.TO")
+            
+            # Remove duplicates and sort
+            tickers = sorted(list(set(tickers)))
+            print(f"Successfully fetched {len(tickers)} TSX tickers from TradingView.")
+            return tickers
+        else:
+            print(f"TradingView scanner API failed with status code: {response.status_code}")
+    except Exception as e:
+        print(f"Error fetching from TradingView: {e}")
+    return None
+
 def fetch_from_wikipedia():
     """
     Falls back to scraping TSX tickers from Wikipedia using regex.
@@ -97,10 +136,14 @@ def fetch_from_wikipedia():
 def main():
     print("Starting Canadian stock ticker list updater...")
     
-    # Try cad_tickers first
-    tickers = fetch_from_cad_tickers()
+    # 1. Try TradingView first (most accurate and active listings)
+    tickers = fetch_from_tradingview()
     
-    # Fallback to Wikipedia if cad_tickers failed
+    # 2. Fallback to cad_tickers library
+    if not tickers or len(tickers) == 0:
+        tickers = fetch_from_cad_tickers()
+        
+    # 3. Fallback to Wikipedia scraping
     if not tickers or len(tickers) == 0:
         tickers = fetch_from_wikipedia()
         
