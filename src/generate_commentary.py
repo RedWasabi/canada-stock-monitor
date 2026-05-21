@@ -64,8 +64,20 @@ def _build_snapshot(top_stocks, n=6):
         volr   = f"{s['vol_ratio']:.1f}x"
         chg    = f"{s['pct_change']:+.1f}%"
         conf   = s["bullish_conf"]
+        
+        # Add trend indicators for quick skimming
+        trend_suffix = ""
+        if s.get("persistence") == "4/4" or s.get("persistence") == "5/5":
+            trend_suffix += " ⭐"  # Persistent signal
+        if s.get("price_trend") == "Continuation":
+            trend_suffix += " 📈"  # Making higher highs
+        elif s.get("price_trend") == "Reversing":
+            trend_suffix += " 📉"  # Making lower lows
+        if s.get("vol_trend") == "Accelerating":
+            trend_suffix += " ⚡"  # Volume building up
+            
         lines.append(
-            f"{emoji} <b>{s['Ticker']}</b>: {chg} | VolR {volr} | "
+            f"{emoji} <b>{s['Ticker']}</b>{trend_suffix}: {chg} | VolR {volr} | "
             f"AI: <b>{conf}%</b> {label}"
         )
     return "\n".join(lines)
@@ -93,6 +105,7 @@ def generate_report(top_stocks, anomalies, insufficient_stocks):
             f"Vol={vol_str} (Avg={avg_vol_str}) VolR={s['vol_ratio']:.1f}x | "
             f"RSI={s['rsi']:.0f} | BB: price is {s['bb_label']} | "
             f"AI Conf={s['bullish_conf']}% ({_conf_label(s['bullish_conf'])}) | "
+            f"Trend: Persist={s.get('persistence','1/1')} Price={s.get('price_trend','Neutral')} Vol={s.get('vol_trend','Neutral')} | "
             f"Signal: {s['signal']}"
         )
     stock_data_str = "\n".join(stock_lines)

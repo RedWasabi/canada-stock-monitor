@@ -12,7 +12,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from gist_store import load_state, save_state
-from fetch_tickers import fetch_active_tickers
+from fetch_tickers import fetch_live_signals
 from analyze_market import analyze_stocks
 from generate_commentary import generate_report, generate_weekly_summary
 from send_telegram import send_telegram_message
@@ -88,6 +88,10 @@ def main():
     # ── 2. Load persistent state from Gist ────────────────────────────────────
     state = load_state(gist_id, pat)
 
+    # Initialize snapshot history if not present
+    if "snapshot_history" not in state:
+        state["snapshot_history"] = []
+
     # ── 3. After-hours / market close handling ────────────────────────────────
     if not args.force_report and market_state == "after_hours":
         last_close_date = state.get("last_close_summary_date", "")
@@ -100,12 +104,17 @@ def main():
 
         # First run after market close today — send close summary
         print("Market just closed. Sending close/weekly summary...")
-        tickers = fetch_active_tickers()
+        live_signals = fetch_live_signals()
+        tickers = list(live_signals.keys())
 
         if args.test_run:
             tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
 
-        processed_stocks, anomalies, insufficient_stocks = analyze_stocks(tickers)
+        # Pass snapshot history to include trend metrics in close report
+        processed_stocks, anomalies, insufficient_stocks = analyze_stocks(
+            tickers, 
+            snapshot_history=state.get("snapshot_history", [])
+        )
         processed_stocks = sorted(processed_stocks, key=lambda x: x["vol_ratio"], reverse=True)
 
         if processed_stocks:
@@ -121,7 +130,9 @@ def main():
         success = send_telegram_message(report_text)
         if success:
             state["last_close_summary_date"] = today
-            print("Close summary sent and date recorded.")
+            # Clear history after sending close report
+            state["snapshot_history"] = []
+            print("Close summary sent and date recorded. History cleared.")
         else:
             print("Failed to send close summary — will retry on next run.")
 
@@ -129,26 +140,64 @@ def main():
         print("--------------------------------------------------")
         sys.exit(0)
 
-    # ── 4. Market is OPEN (or --force-report) — run normal hourly analysis ────
-    print("Market is open. Running analysis...")
+    # ── 4. Market is OPEN (or --force-report) — run accumulation ──────────────
+    print("Market is open. Fetching live signals from TradingView...")
+    live_signals = fetch_live_signals()
+    
+    current_timestamp = time.time()
+    
+    # Save current live signals to snapshot history
+    new_snapshot = {
+        "timestamp": current_timestamp,
+        "data": live_signals
+    }
+    
+    # Add to rolling history (max 5 snapshots, covering ~1 hour)
+    history = state.get("snapshot_history", [])
+    history.append(new_snapshot)
+    state["snapshot_history"] = history[-5:]
+    
+    # Check if it's time to send the hourly Telegram report
+    last_report_time    = state.get("last_report_time", 0)
+    time_since_report   = current_timestamp - last_report_time
+    # 3300 seconds = 55 minutes
+    is_report_time = time_since_report >= 3300 or args.force_report
 
-    # 4a. Fetch active signal stocks from TradingView (300 max)
-    tickers = fetch_active_tickers()
+    print(f"Accumulated {len(state['snapshot_history'])} snapshots. Time since last report: {time_since_report / 60:.1f} minutes.")
+
+    if not is_report_time:
+        print("Not yet time to report. Snapshot accumulated. Saving state and exiting fast.")
+        save_state(state, gist_id, pat)
+        print("--------------------------------------------------")
+        sys.exit(0)
+
+    # ── 5. Hourly Report Generation ───────────────────────────────────────────
+    print("Time to report. Downloading price history and analyzing accumulated signals...")
+
+    # Get the union of all tickers that appeared in any snapshot in the last hour
+    union_tickers = set()
+    for snap in state["snapshot_history"]:
+        union_tickers.update(snap.get("data", {}).keys())
+    union_tickers = list(union_tickers)
 
     if args.test_run:
-        tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
-        print(f"TEST MODE — using tickers: {tickers}")
+        union_tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+        print(f"TEST MODE — using tickers: {union_tickers}")
 
-    # 4b. Download price history and compute indicators
-    processed_stocks, anomalies, insufficient_stocks = analyze_stocks(tickers)
+    print(f"Analyzing a total of {len(union_tickers)} unique tickers from history...")
+
+    # Run yfinance analysis using accumulated snapshot history for trend metrics
+    processed_stocks, anomalies, insufficient_stocks = analyze_stocks(
+        union_tickers, 
+        snapshot_history=state["snapshot_history"]
+    )
     print(f"Analysis complete. {len(processed_stocks)} stocks passed the liquidity filter.")
 
     # Sort by pct_change descending to surface top movers for the report
     processed_stocks_by_change = sorted(processed_stocks, key=lambda x: x["pct_change"], reverse=True)
     top_20 = processed_stocks_by_change[:20]
 
-    # 4c. Save current snapshot to state
-    current_timestamp = time.time()
+    # Save current snapshot to state (for any direct dashboard references)
     state["snapshots"] = {
         "timestamp": current_timestamp,
         "stocks":    {s["Ticker"]: s for s in processed_stocks},
@@ -156,37 +205,27 @@ def main():
         "insufficient": insufficient_stocks
     }
 
-    # 4d. Time gate: only send a Telegram report once per ~hour
-    last_report_time    = state.get("last_report_time", 0)
-    time_since_report   = current_timestamp - last_report_time
-    # 3300 seconds = 55 minutes (accounts for cron timing variance)
-    is_report_time = time_since_report >= 3300 or args.force_report
-
-    print(f"Time since last report: {time_since_report / 60:.1f} minutes.")
-
-    if is_report_time:
-        print("Time to report. Generating Groq commentary...")
-
-        if not top_20:
-            report_text = (
-                "<b>📊 US MARKET SIGNAL REPORT</b>\n\n"
-                "No stocks passed all filters this hour."
-            )
-        else:
-            report_text = generate_report(top_20, anomalies, insufficient_stocks)
-
-        print("Sending report to Telegram...")
-        success = send_telegram_message(report_text)
-
-        if success:
-            state["last_report_time"] = current_timestamp
-            print("Telegram report sent. Timer reset.")
-        else:
-            print("Failed to send report — will retry on next run.")
+    print("Generating Groq commentary...")
+    if not top_20:
+        report_text = (
+            "<b>📊 US MARKET SIGNAL REPORT</b>\n\n"
+            "No stocks passed all filters this hour."
+        )
     else:
-        print("Not yet time to report. Skipping Telegram notification.")
+        report_text = generate_report(top_20, anomalies, insufficient_stocks)
 
-    # 4e. Persist updated state
+    print("Sending report to Telegram...")
+    success = send_telegram_message(report_text)
+
+    if success:
+        state["last_report_time"] = current_timestamp
+        # Clear snapshot history to start fresh for the next hour
+        state["snapshot_history"] = []
+        print("Telegram report sent. Timer reset. History cleared.")
+    else:
+        print("Failed to send report — will retry on next run.")
+
+    # Persist updated state
     save_state(state, gist_id, pat)
     print("Bot workflow complete.")
     print("--------------------------------------------------")

@@ -74,7 +74,100 @@ def calculate_bullish_confidence(pct_change, vol_ratio, rsi, signal):
     return max(0, min(100, int(round(score))))
 
 
-def analyze_stocks(tickers):
+def calculate_trend_metrics(ticker, snapshot_history):
+    """
+    Analyzes the snapshot history for a given ticker to determine:
+      - persistence: fraction of snapshots where the stock was present (e.g., 3/4)
+      - price_trend: "Continuation" (increasing), "Reversing" (decreasing), or "Neutral"
+      - vol_trend: "Accelerating" (increasing volume ratio) or "Fading" (decreasing)
+      - trend_confidence_adjustment: int value to add/subtract from base confidence
+    """
+    if not snapshot_history:
+        return {
+            "persistence": "1/1",
+            "price_trend": "Neutral",
+            "vol_trend": "Neutral",
+            "adjustment": 0,
+            "history_closes": [],
+            "history_vols": []
+        }
+        
+    prices = []
+    vols = []
+    present_count = 0
+    total_snapshots = len(snapshot_history)
+    
+    for snap in snapshot_history:
+        snap_data = snap.get("data", {})
+        if ticker in snap_data:
+            present_count += 1
+            prices.append(snap_data[ticker]["close"])
+            vols.append(snap_data[ticker]["vol_ratio"])
+            
+    persistence_str = f"{present_count}/{total_snapshots}"
+    
+    # Need at least 2 data points in history to calculate trend
+    if len(prices) < 2:
+        # If it only appeared once in multiple runs, it's a transient spike
+        adjustment = -15 if total_snapshots >= 3 and present_count == 1 else 0
+        return {
+            "persistence": persistence_str,
+            "price_trend": "Neutral",
+            "vol_trend": "Neutral",
+            "adjustment": adjustment,
+            "history_closes": prices,
+            "history_vols": vols
+        }
+        
+    # Check price trend
+    # If all consecutive changes are positive -> Continuation
+    # If all consecutive changes are negative -> Reversing
+    price_diffs = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+    if all(d > 0 for d in price_diffs):
+        price_trend = "Continuation"
+        price_adj = 10
+    elif all(d < 0 for d in price_diffs):
+        price_trend = "Reversing"
+        price_adj = -10
+    else:
+        price_trend = "Neutral"
+        price_adj = 0
+        
+    # Check volume trend
+    vol_diffs = [vols[i] - vols[i-1] for i in range(1, len(vols))]
+    if all(d > 0 for d in vol_diffs):
+        vol_trend = "Accelerating"
+        vol_adj = 10
+    elif all(d < 0 for d in vol_diffs):
+        vol_trend = "Fading"
+        vol_adj = -5
+    else:
+        vol_trend = "Neutral"
+        vol_adj = 0
+        
+    # Persistence adjustment
+    persist_ratio = present_count / total_snapshots
+    if persist_ratio >= 0.9:
+        persist_adj = 15
+    elif persist_ratio >= 0.7:
+        persist_adj = 10
+    elif persist_ratio <= 0.3:
+        persist_adj = -15
+    else:
+        persist_adj = 0
+        
+    adjustment = price_adj + vol_adj + persist_adj
+    return {
+        "persistence": persistence_str,
+        "price_trend": price_trend,
+        "vol_trend": vol_trend,
+        "adjustment": adjustment,
+        "history_closes": prices,
+        "history_vols": vols
+    }
+
+
+def analyze_stocks(tickers, snapshot_history=None):
     """
     Downloads 90 days of OHLCV data for the given tickers in rate-limit-safe chunks,
     then computes technical indicators and returns:
@@ -240,6 +333,13 @@ def analyze_stocks(tickers):
 
             signal_str = ", ".join(signals) if signals else "Normal"
 
+            # Calculate base confidence
+            base_conf = calculate_bullish_confidence(pct_change, vol_ratio, latest_rsi, signal_str)
+
+            # Apply trend adjustments if snapshot history is available
+            trend = calculate_trend_metrics(ticker, snapshot_history)
+            final_conf = max(0, min(100, base_conf + trend["adjustment"]))
+
             stock_info = {
                 "Ticker":          ticker,
                 # OHLC for Groq deep analysis
@@ -264,7 +364,12 @@ def analyze_stocks(tickers):
                 "alert_status":    alert_status,
                 "signal":          signal_str,
                 # AI Bullish Confidence score (0–100)
-                "bullish_conf":    calculate_bullish_confidence(pct_change, vol_ratio, latest_rsi, signal_str),
+                "bullish_conf":    final_conf,
+                # Trend metrics
+                "persistence":     trend["persistence"],
+                "price_trend":     trend["price_trend"],
+                "vol_trend":       trend["vol_trend"],
+                "trend_adj":       trend["adjustment"]
             }
 
             processed_stocks.append(stock_info)
