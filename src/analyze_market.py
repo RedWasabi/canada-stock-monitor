@@ -25,6 +25,55 @@ def calculate_rsi(prices, period=14):
     return rsi
 
 
+def calculate_bullish_confidence(pct_change, vol_ratio, rsi, signal):
+    """
+    Computes a 0–100 AI Bullish Confidence score based on technical indicators.
+    Higher score = stronger evidence the stock will move up.
+
+    Score components:
+      - Price direction  : up to ±20 pts
+      - Volume confirmation: up to ±15 pts (volume must confirm the direction)
+      - RSI zone         : ±8–15 pts (oversold = bullish potential; overbought = risk)
+      - Signal bonus     : ±12–15 pts (Bullish/Bearish BB, Oversold/Overbought)
+    """
+    score = 50  # neutral baseline
+
+    # 1. Price direction (+20 max for strong up move, -20 for strong down)
+    score += max(-20, min(20, pct_change * 2.5))
+
+    # 2. Volume confirmation (volume must agree with the price direction)
+    if vol_ratio >= 2.0 and pct_change > 0:
+        score += 15   # strong volume confirms up move
+    elif vol_ratio >= 1.5 and pct_change > 0:
+        score += 10   # moderate volume confirms up move
+    elif vol_ratio >= 2.0 and pct_change < 0:
+        score -= 15   # strong volume confirms down move
+    elif vol_ratio >= 1.5 and pct_change < 0:
+        score -= 10
+
+    # 3. RSI zone
+    if rsi <= 30:
+        score += 15   # deeply oversold → bullish reversal potential
+    elif rsi <= 40:
+        score += 8    # approaching oversold
+    elif rsi >= 70:
+        score -= 15   # overbought → limited upside, reversal risk
+    elif rsi >= 65:
+        score -= 8
+
+    # 4. Signal bonus/penalty
+    if "Bullish BB" in signal:
+        score += 15
+    elif "Bearish BB" in signal:
+        score -= 15
+    if "Oversold" in signal:
+        score += 12
+    elif "Overbought" in signal:
+        score -= 12
+
+    return max(0, min(100, int(round(score))))
+
+
 def analyze_stocks(tickers):
     """
     Downloads 90 days of OHLCV data for the given tickers in rate-limit-safe chunks,
@@ -214,6 +263,8 @@ def analyze_stocks(tickers):
                 # Classification
                 "alert_status":    alert_status,
                 "signal":          signal_str,
+                # AI Bullish Confidence score (0–100)
+                "bullish_conf":    calculate_bullish_confidence(pct_change, vol_ratio, latest_rsi, signal_str),
             }
 
             processed_stocks.append(stock_info)
