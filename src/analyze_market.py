@@ -1,6 +1,7 @@
 import pandas as pd
 import yfinance as yf
 import numpy as np
+import time
 
 
 def calculate_rsi(prices, period=14):
@@ -33,24 +34,46 @@ def analyze_stocks(tickers):
     - A list of stocks with extreme price moves without a volume spike (anomalies)
     - A list of stocks with insufficient data for volume trend analysis
     """
-    print(f"Downloading data for {len(tickers)} tickers in bulk...")
+    print(f"Downloading data for {len(tickers)} tickers in chunked bulk format...")
 
-    # Download 90 days of data to ensure we have enough history for:
-    # - 14-period Wilder's RSI (needs ~28+ trading days for warmup)
-    # - 20-period Bollinger Bands (needs 20 trading days minimum)
-    # 90 calendar days gives ~63 trading days, which is sufficient.
+    # We download in chunks of 100 to avoid Yahoo Finance rate limits (YFRateLimitError).
+    # Multi-threading (threads=True) is used within each chunk to download quickly.
+    chunk_size = 100
+    chunks = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
+    successful_dfs = []
+
+    for idx, chunk in enumerate(chunks):
+        print(f"Downloading chunk {idx + 1}/{len(chunks)} ({len(chunk)} tickers)...")
+        try:
+            # Download 90 days of data to ensure we have enough history for:
+            # - 14-period Wilder's RSI (needs ~28+ trading days for warmup)
+            # - 20-period Bollinger Bands (needs 20 trading days minimum)
+            data_chunk = yf.download(
+                chunk,
+                period="90d",
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=True
+            )
+            if not data_chunk.empty:
+                successful_dfs.append(data_chunk)
+        except Exception as e:
+            print(f"Error downloading chunk {idx + 1}: {e}")
+
+        # Sleep 1.5 seconds between chunks to respect Yahoo's rate limit policies
+        time.sleep(1.5)
+
+    if not successful_dfs:
+        print("Error: Failed to download data for any tickers.")
+        return [], [], []
+
     try:
-        data = yf.download(
-            tickers,
-            period="90d",
-            interval="1d",
-            group_by="ticker",
-            auto_adjust=True,
-            progress=False,
-            threads=False
-        )
+        # Concatenate all chunked dataframes side-by-side (matching on Date index)
+        data = pd.concat(successful_dfs, axis=1)
     except Exception as e:
-        print(f"Error downloading bulk data from yfinance: {e}")
+        print(f"Error concatenating chunk data: {e}")
         return [], [], []
 
     processed_stocks = []
