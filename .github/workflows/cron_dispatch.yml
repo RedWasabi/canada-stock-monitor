@@ -31,4 +31,13 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GIST_ID: ${{ secrets.GIST_ID }}
           GH_PAT: ${{ secrets.GH_PAT }}
-        run: python src/main.py
+        run: |
+          # When manually triggered via GitHub UI (workflow_dispatch), force send the report immediately.
+          # When triggered by cron-job.org (repository_dispatch), run normally with 1-hour time gate.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger detected — forcing report send."
+            python src/main.py --force-report
+          else
+            echo "Automatic cron trigger — running normally."
+            python src/main.py
+          fi
