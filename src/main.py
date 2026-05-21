@@ -42,8 +42,8 @@ def main():
         all_tickers = json.load(f)
 
     if args.test_run:
-        # Use a small subset of highly active stocks for quick test
-        all_tickers = ["SHOP.TO", "RY.TO", "TD.TO", "ENB.TO", "HUT.TO"]
+        # Use a small subset of highly active US stocks for quick test
+        all_tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
         print(f"Running in TEST mode with tickers: {all_tickers}")
 
     # 3. Analyze stocks (fetches data, calculates MAs, applies filters)
@@ -78,7 +78,7 @@ def main():
         # Call Groq API to compile the report and generate commentary
         # Note: If no stocks passed the filter, we handle it
         if not top_20:
-            report_text = "<b>📊 CANADIAN STOCK MARKET DAILY AUDIT REPORT</b>\n\nNo stocks passed the liquidity requirement of 1,000,000 average volume today."
+            report_text = "<b>📊 US STOCK MARKET DAILY AUDIT REPORT</b>\n\nNo stocks passed the liquidity requirement of 1,000,000 average volume today."
             if insufficient_stocks:
                 report_text += "\n\nInsufficient data for volume trend analysis for: " + ", ".join(insufficient_stocks)
         else:

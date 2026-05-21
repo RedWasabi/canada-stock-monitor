@@ -2,6 +2,25 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 
+def calculate_rsi(prices, period=14):
+    """
+    Calculates Wilder's RSI for a pandas Series of prices.
+    """
+    if len(prices) < period + 1:
+        return np.nan
+    
+    delta = prices.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    
+    # Wilder's smoothing (alpha = 1 / period)
+    avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
 def analyze_stocks(tickers):
     """
     Downloads historical data for the tickers, processes them, and returns:
@@ -11,9 +30,9 @@ def analyze_stocks(tickers):
     """
     print(f"Downloading data for {len(tickers)} tickers in bulk...")
     
-    # Download 35 days of data to ensure we have at least 20 trading days
+    # Download 60 days of data to ensure we have enough data for 14-period RSI and 20-period Bollinger Bands
     try:
-        data = yf.download(tickers, period="35d", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=False)
+        data = yf.download(tickers, period="60d", interval="1d", group_by="ticker", auto_adjust=True, progress=False, threads=False)
     except Exception as e:
         print(f"Error downloading bulk data from yfinance: {e}")
         return [], [], []
@@ -22,9 +41,7 @@ def analyze_stocks(tickers):
     anomalies = []
     insufficient_data_stocks = []
 
-    # If yf.download returns a single ticker, group_by might behave differently,
-    # but we will always have multiple tickers here.
-    # We support both multi-index columns and single ticker DataFrame.
+    # Support both multi-index columns and single ticker DataFrame
     has_multi_index = isinstance(data.columns, pd.MultiIndex)
 
     for ticker in tickers:
@@ -35,46 +52,35 @@ def analyze_stocks(tickers):
                     continue
                 df = data[ticker].copy()
             else:
-                # If only one ticker was requested
                 df = data.copy()
             
             # Clean up missing rows
             df = df.dropna(subset=['Close', 'Volume'])
             
-            # If the stock has no data at all, it is likely delisted or invalid.
-            # We skip it entirely to keep the report clean.
+            # Skip delisted or empty tickers
             if len(df) == 0:
                 continue
 
-            # Check for insufficient data
-            # We need at least 21 days: 20 days for the volume moving average, 
-            # and today's data to compare.
-            if len(df) < 20:
+            # Need at least 21 days for moving average calculations
+            if len(df) < 21:
                 insufficient_data_stocks.append(ticker)
                 continue
 
-            # Identify "today's" data and "historical" data.
-            # Usually, the last row in df is the current day's latest data.
-            current_close = float(df['Close'].iloc[-1])
-            previous_close = float(df['Close'].iloc[-2])
-            current_volume = float(df['Volume'].iloc[-1])
+            # Extract Close and Volume histories
+            close_history = df['Close']
+            volume_history = df['Volume']
+
+            current_close = float(close_history.iloc[-1])
+            previous_close = float(close_history.iloc[-2])
+            current_volume = float(volume_history.iloc[-1])
 
             # Calculate price percentage change from previous close
-            pct_change = ((current_close - previous_close) / previous_close) * 100
+            pct_change = ((current_close - previous_close) / previous_close) * 100.0
 
-            # Calculate 20-period moving average of volume of the preceding 20 days (excluding today's incomplete volume if market is open,
-            # or including it if we want the moving average of the last 20 periods.
-            # The prompt says: "Identify stocks where the current volume is at least 3% higher than the 20-period moving average."
-            # We will calculate the 20-period moving average of daily volume over the past 20 trading days.
-            # We can use the last 20 days of volume including today, or excluding today.
-            # Let's use the past 20 days excluding today: df['Volume'].iloc[-21:-1].mean()
-            # If the market is closed, today's volume is complete. If it's open, today's volume is building.
-            # Excluding today is standard for checking a spike against historical baseline.
-            # Let's calculate the baseline average volume:
-            vol_history = df['Volume'].iloc[-21:-1]
+            # Calculate 20-period moving average of volume excluding today
+            vol_history = volume_history.iloc[-21:-1]
             if len(vol_history) < 20:
-                # Fall back to including today if there aren't enough preceding days
-                vol_history = df['Volume'].iloc[-20:]
+                vol_history = volume_history.iloc[-20:]
                 
             avg_volume_20 = float(vol_history.mean())
 
@@ -82,16 +88,52 @@ def analyze_stocks(tickers):
             if avg_volume_20 < 1000000:
                 continue
 
-            # Calculate Volume vs Avg (%)
-            # If average volume is 0, set to 0
-            if avg_volume_20 > 0:
-                vol_vs_avg = ((current_volume - avg_volume_20) / avg_volume_20) * 100
-            else:
-                vol_vs_avg = 0.0
+            # Calculate Volume Ratio and Volume vs Avg (%)
+            vol_ratio = current_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0
+            vol_vs_avg = (vol_ratio - 1.0) * 100.0
 
             # Volume Spike: current volume is at least 3% higher than 20-period moving average
             is_spike = vol_vs_avg >= 3.0
             alert_status = "Spike" if is_spike else ""
+
+            # 1. Calculate Wilder's RSI (14-day)
+            rsi_series = calculate_rsi(close_history, period=14)
+            latest_rsi = float(rsi_series.iloc[-1]) if not np.isnan(rsi_series.iloc[-1]) else 50.0
+
+            # 2. Calculate Bollinger Bands (20-day)
+            sma_20_series = close_history.rolling(window=20).mean()
+            std_20_series = close_history.rolling(window=20).std()
+            
+            latest_sma_20 = float(sma_20_series.iloc[-1])
+            latest_std_20 = float(std_20_series.iloc[-1])
+            
+            latest_upper_bb = latest_sma_20 + 2.0 * latest_std_20
+            latest_lower_bb = latest_sma_20 - 2.0 * latest_std_20
+
+            # 3. Calculate Daily Return Standard Deviation (for high volatility move detection)
+            pct_changes_series = close_history.pct_change() * 100.0
+            std_pct_series = pct_changes_series.rolling(window=20).std()
+            latest_std_pct = float(std_pct_series.iloc[-1]) if not np.isnan(std_pct_series.iloc[-1]) else 0.0
+            is_high_volatility = abs(pct_change) > (2.0 * latest_std_pct) if latest_std_pct > 0 else False
+
+            # 4. Generate Signals
+            signals = []
+            if current_close > latest_upper_bb and vol_ratio >= 1.5:
+                signals.append("Bullish BB")
+            elif current_close < latest_lower_bb and vol_ratio >= 1.5:
+                signals.append("Bearish BB")
+            elif vol_ratio >= 2.0:
+                signals.append("Vol Surge")
+
+            if latest_rsi >= 70:
+                signals.append("Overbought")
+            elif latest_rsi <= 30:
+                signals.append("Oversold")
+
+            if is_high_volatility and not any("BB" in s for s in signals):
+                signals.append("High Vol")
+
+            signal_str = ", ".join(signals) if signals else "Normal"
 
             stock_info = {
                 "Ticker": ticker,
@@ -100,7 +142,13 @@ def analyze_stocks(tickers):
                 "avg_volume": avg_volume_20,
                 "current_volume": current_volume,
                 "vol_vs_avg": vol_vs_avg,
-                "alert_status": alert_status
+                "vol_ratio": vol_ratio,
+                "rsi": latest_rsi,
+                "upper_bb": latest_upper_bb,
+                "lower_bb": latest_lower_bb,
+                "sma_20": latest_sma_20,
+                "alert_status": alert_status,
+                "signal": signal_str
             }
 
             processed_stocks.append(stock_info)
@@ -114,3 +162,4 @@ def analyze_stocks(tickers):
             continue
 
     return processed_stocks, anomalies, insufficient_data_stocks
+
