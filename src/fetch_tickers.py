@@ -13,6 +13,7 @@ def fetch_active_tickers_with_data(use_fallback=False):
     # Base filters — ALL must be true (AND logic)
     filters = [
         {"left": "exchange",               "operation": "in_range",  "right": ["NYSE", "NASDAQ", "AMEX"]},
+        {"left": "average_volume_30d_calc", "operation": "greater",   "right": 1500000},
         {"left": "close",                  "operation": "greater",   "right": 1.0},
     ]
     
@@ -74,10 +75,10 @@ def fetch_active_tickers_with_data(use_fallback=False):
                     continue
                 sym_clean = sym.replace(".", "-")
                 
-                # Minimum volume filter: average daily dollar volume must be > $1,000,000 USD
+                # Minimum volume filter: average daily volume must be > 1,500,000 shares
                 close_price = float(d[1]) if d[1] is not None else 0.0
                 avg_vol_shares = float(d[5]) if d[5] is not None else 0.0
-                if avg_vol_shares * close_price <= 1000000.0:
+                if avg_vol_shares <= 1500000.0:
                     continue
                 
                 results[sym_clean] = {
