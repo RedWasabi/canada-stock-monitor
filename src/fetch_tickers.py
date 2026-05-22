@@ -13,7 +13,6 @@ def fetch_active_tickers_with_data(use_fallback=False):
     # Base filters — ALL must be true (AND logic)
     filters = [
         {"left": "exchange",               "operation": "in_range",  "right": ["NYSE", "NASDAQ", "AMEX"]},
-        {"left": "average_volume_30d_calc", "operation": "greater",   "right": 1000000},
         {"left": "close",                  "operation": "greater",   "right": 1.0},
     ]
     
@@ -22,7 +21,7 @@ def fetch_active_tickers_with_data(use_fallback=False):
         "options": {"active_symbols_only": True},
         "markets": ["america"],
         "symbols": {"query": {"types": ["stock"]}, "tickers": []},
-        "columns": ["name", "close", "change", "relative_volume_10d_calc", "RSI"],
+        "columns": ["name", "close", "change", "relative_volume_10d_calc", "RSI", "average_volume_30d_calc"],
     }
     
     if use_fallback:
@@ -68,15 +67,21 @@ def fetch_active_tickers_with_data(use_fallback=False):
             results = {}
             for item in data.get("data", []):
                 d = item.get("d", [])
-                if len(d) < 5 or not d[0]:
+                if len(d) < 6 or not d[0]:
                     continue
                 sym = str(d[0]).strip()
                 if "/" in sym or " " in sym:
                     continue
                 sym_clean = sym.replace(".", "-")
                 
+                # Minimum volume filter: average daily dollar volume must be > $1,000,000 USD
+                close_price = float(d[1]) if d[1] is not None else 0.0
+                avg_vol_shares = float(d[5]) if d[5] is not None else 0.0
+                if avg_vol_shares * close_price <= 1000000.0:
+                    continue
+                
                 results[sym_clean] = {
-                    "close": float(d[1]) if d[1] is not None else 0.0,
+                    "close": close_price,
                     "pct_change": float(d[2]) if d[2] is not None else 0.0,
                     "vol_ratio": float(d[3]) if d[3] is not None else 1.0,
                     "rsi": float(d[4]) if d[4] is not None else 50.0

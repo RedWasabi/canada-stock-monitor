@@ -267,8 +267,9 @@ def analyze_stocks(tickers, snapshot_history=None):
                 vol_hist_20 = volume_history.iloc[:-1]
             avg_volume_20 = float(vol_hist_20.mean())
 
-            # Liquidity filter: drop stocks with avg daily volume < 1,000,000
-            if avg_volume_20 < 1_000_000:
+            # Liquidity filter: drop stocks with avg daily dollar volume < $1,000,000 USD
+            avg_dollar_volume_20 = avg_volume_20 * today_close
+            if avg_dollar_volume_20 < 1_000_000:
                 continue
 
             vol_ratio   = today_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0
