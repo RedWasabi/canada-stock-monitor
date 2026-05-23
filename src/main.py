@@ -68,6 +68,13 @@ def main():
     print("--------------------------------------------------")
     print(f"Bot triggered at: {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S ET')}")
 
+    # Load persistent state from Gist or local fallback early
+    state = load_state(gist_id, pat)
+
+    # Initialize snapshot history if not present
+    if "snapshot_history" not in state:
+        state["snapshot_history"] = []
+
     # ── 1. Market Hours State Machine ─────────────────────────────────────────
     market_state = get_market_state()
     print(f"Market state: {market_state.upper()}")
@@ -79,18 +86,61 @@ def main():
             print("--------------------------------------------------")
             sys.exit(0)
 
-        # PRE-MARKET: exit silently — no pre-market reporting
+        # PRE-MARKET handling (Mon-Fri)
         if market_state == "pre_market":
-            print("Pre-market hours — nothing to report yet. Exiting.")
-            print("--------------------------------------------------")
-            sys.exit(0)
-
-    # ── 2. Load persistent state from Gist ────────────────────────────────────
-    state = load_state(gist_id, pat)
-
-    # Initialize snapshot history if not present
-    if "snapshot_history" not in state:
-        state["snapshot_history"] = []
+            now_et = datetime.now(ET)
+            today = today_et_str()
+            last_pre_date = state.get("last_pre_market_summary_date", "")
+            
+            # Is it between 08:30 ET and 09:30 ET?
+            current_minutes = now_et.hour * 60 + now_et.minute
+            is_pre_market_report_time = (510 <= current_minutes < 570)
+            
+            if is_pre_market_report_time and last_pre_date != today:
+                print("Pre-market window open (08:30-09:30 ET). Generating morning briefing...")
+                finnhub_key = os.environ.get("FINNHUB_API_KEY")
+                
+                from news_fetcher import fetch_fed_news, fetch_market_news, fetch_insider_transactions
+                
+                print("Fetching macro news (Fed)...")
+                fed_news = fetch_fed_news(hours_back=24)
+                
+                print("Fetching general market headlines...")
+                market_news = fetch_market_news(finnhub_key)
+                
+                print("Fetching insider transactions for priority tickers...")
+                priority_tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+                insider_txs = []
+                if finnhub_key:
+                    for ticker in priority_tickers:
+                        txs = fetch_insider_transactions(ticker, finnhub_key, days_back=7)
+                        insider_txs.extend(txs)
+                        time.sleep(0.5)
+                
+                news_data = {
+                    "fed_news": fed_news,
+                    "market_news": market_news,
+                    "insider_transactions": insider_txs
+                }
+                
+                from generate_commentary import generate_pre_market_summary
+                report_text = generate_pre_market_summary(news_data)
+                
+                success = send_telegram_message(report_text)
+                if success:
+                    state["last_pre_market_summary_date"] = today
+                    state["snapshot_history"] = []  # Clear snapshots to start fresh at market open
+                    print("Pre-market summary sent and date recorded.")
+                else:
+                    print("Failed to send pre-market summary — will retry on next dispatch.")
+                
+                save_state(state, gist_id, pat)
+                print("--------------------------------------------------")
+                sys.exit(0)
+            else:
+                print("Silent pre-market hour or report already sent today. Exiting.")
+                print("--------------------------------------------------")
+                sys.exit(0)
 
     # ── 3. After-hours / market close handling ────────────────────────────────
     if not args.force_report and market_state == "after_hours":
@@ -123,7 +173,31 @@ def main():
                 report_text = generate_weekly_summary(processed_stocks)
             else:
                 print("Generating daily market close summary & next-day forecast...")
-                report_text = generate_daily_close_summary(processed_stocks, anomalies, insufficient_stocks)
+                # Fetch news for top 5 close stocks
+                finnhub_key = os.environ.get("FINNHUB_API_KEY")
+                news_data = None
+                if finnhub_key:
+                    from news_fetcher import fetch_ticker_news, fetch_insider_transactions
+                    print("Fetching close news and insider flows for top movers...")
+                    ticker_news = {}
+                    insider_txs = []
+                    
+                    for s in processed_stocks[:5]:
+                        t_sym = s["Ticker"]
+                        print(f"  Fetching news for {t_sym}...")
+                        articles = fetch_ticker_news(t_sym, finnhub_key, days_back=1)
+                        ticker_news[t_sym] = articles
+                        
+                        print(f"  Fetching insider transactions for {t_sym}...")
+                        txs = fetch_insider_transactions(t_sym, finnhub_key, days_back=14)
+                        insider_txs.extend(txs)
+                        time.sleep(0.5)
+                        
+                    news_data = {
+                        "ticker_news": ticker_news,
+                        "insider_transactions": insider_txs
+                    }
+                report_text = generate_daily_close_summary(processed_stocks, anomalies, insufficient_stocks, news_data=news_data)
         else:
             report_text = "<b>🔔 Market Close</b>\n\nNo active signals detected today.\n\n<b>💤</b> The market is now closed."
 
@@ -212,7 +286,31 @@ def main():
             "No stocks passed all filters this hour."
         )
     else:
-        report_text = generate_report(top_20, anomalies, insufficient_stocks)
+        # Fetch ticker-specific news for top active signal stocks
+        finnhub_key = os.environ.get("FINNHUB_API_KEY")
+        news_data = None
+        if finnhub_key:
+            from news_fetcher import fetch_ticker_news, fetch_insider_transactions
+            print("Fetching real-time news and insider flows for top movers...")
+            ticker_news = {}
+            insider_txs = []
+            
+            for s in top_20[:5]:
+                t_sym = s["Ticker"]
+                print(f"  Fetching news for {t_sym}...")
+                articles = fetch_ticker_news(t_sym, finnhub_key, days_back=1)
+                ticker_news[t_sym] = articles
+                
+                print(f"  Fetching insider transactions for {t_sym}...")
+                txs = fetch_insider_transactions(t_sym, finnhub_key, days_back=14)
+                insider_txs.extend(txs)
+                time.sleep(0.5)
+                
+            news_data = {
+                "ticker_news": ticker_news,
+                "insider_transactions": insider_txs
+            }
+        report_text = generate_report(top_20, anomalies, insufficient_stocks, news_data=news_data)
 
     print("Sending report to Telegram...")
     success = send_telegram_message(report_text)

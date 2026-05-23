@@ -83,7 +83,7 @@ def _build_snapshot(top_stocks, n=6):
     return "\n".join(lines)
 
 
-def generate_report(top_stocks, anomalies, insufficient_stocks):
+def generate_report(top_stocks, anomalies, insufficient_stocks, news_data=None):
     """
     Sends rich OHLCV + indicator data (incl. AI Bullish Confidence %) to Groq
     to generate an in-depth US stock market signal report for Telegram.
@@ -117,12 +117,38 @@ def generate_report(top_stocks, anomalies, insufficient_stocks):
 
     insufficient_str = ", ".join(insufficient_stocks) if insufficient_stocks else "None"
 
+    # Build news prompt section if news_data is provided
+    news_prompt_addition = ""
+    if news_data:
+        ticker_news_str = ""
+        insider_txs_str = ""
+        
+        if news_data.get("ticker_news"):
+            for ticker, articles in news_data["ticker_news"].items():
+                if articles:
+                    ticker_news_str += f"\nNews/Events for {ticker}:\n"
+                    for art in articles:
+                        ticker_news_str += f"  - {art.get('headline')} (Source: {art.get('source')})\n"
+                        
+        if news_data.get("insider_transactions"):
+            top_tickers = {s["Ticker"] for s in top_stocks}
+            for tx in news_data["insider_transactions"]:
+                if tx.get("symbol") in top_tickers:
+                    change_type = "BUY" if tx.get("change", 0) > 0 else "SELL"
+                    insider_txs_str += (
+                        f"  - {tx.get('symbol')}: {tx.get('name')} ({tx.get('position')}) "
+                        f"{change_type} {abs(tx.get('change', 0)):,} shares (Date: {tx.get('transactionDate')})\n"
+                    )
+                    
+        if ticker_news_str or insider_txs_str:
+            news_prompt_addition = f"\n=== NEWS & INSIDER MOVES FOR THESE STOCKS ==={ticker_news_str}{insider_txs_str}\n"
+
     prompt = f"""
 You are a senior Wall Street quantitative analyst writing a real-time stock signal report for a professional Telegram trading channel.
 
 Every stock below was pre-screened for live signals (volume surge, RSI extreme, or significant price move).
 An "AI Bullish Confidence" score (0–100%) is already pre-computed from technical indicators — use it in your analysis but you may also refine it based on OHLC candle patterns.
-
+{news_prompt_addition}
 === TODAY'S ACTIVE SIGNAL STOCKS (Top 20 by price change) ===
 {stock_data_str}
 
@@ -285,7 +311,7 @@ The US stock market has just closed for the week. Below is the closing and trend
         return generate_fallback_close_report(all_stocks)
 
 
-def generate_daily_close_summary(all_stocks, anomalies, insufficient_stocks):
+def generate_daily_close_summary(all_stocks, anomalies, insufficient_stocks, news_data=None):
     """
     Generates a Monday-Thursday end-of-day market-close summary using Groq.
     This report contains today's market wrap-up and a detailed, data-driven
@@ -321,8 +347,35 @@ def generate_daily_close_summary(all_stocks, anomalies, insufficient_stocks):
 
     insufficient_str = ", ".join(insufficient_stocks) if insufficient_stocks else "None"
 
+    # Build news prompt section if news_data is provided
+    news_prompt_addition = ""
+    if news_data:
+        ticker_news_str = ""
+        insider_txs_str = ""
+        
+        if news_data.get("ticker_news"):
+            for ticker, articles in news_data["ticker_news"].items():
+                if articles:
+                    ticker_news_str += f"\nNews/Events for {ticker}:\n"
+                    for art in articles:
+                        ticker_news_str += f"  - {art.get('headline')} (Source: {art.get('source')})\n"
+                        
+        if news_data.get("insider_transactions"):
+            top_tickers = {s["Ticker"] for s in top_stocks}
+            for tx in news_data["insider_transactions"]:
+                if tx.get("symbol") in top_tickers:
+                    change_type = "BUY" if tx.get("change", 0) > 0 else "SELL"
+                    insider_txs_str += (
+                        f"  - {tx.get('symbol')}: {tx.get('name')} ({tx.get('position')}) "
+                        f"{change_type} {abs(tx.get('change', 0)):,} shares (Date: {tx.get('transactionDate')})\n"
+                    )
+                    
+        if ticker_news_str or insider_txs_str:
+            news_prompt_addition = f"\n=== NEWS & INSIDER MOVES FOR THESE STOCKS ==={ticker_news_str}{insider_txs_str}\n"
+
     prompt = f"""
 You are a senior Wall Street quantitative strategist writing a daily close report and next-day forecast for a professional Telegram trading channel.
+{news_prompt_addition}
 
 Today's trading session has just concluded. Below is the final data for the most active stocks, including accumulated trend indicators from snapshot checks conducted throughout the day:
 - **Persistence (e.g. 4/5)**: How consistently the ticker was flagged in scanning snapshots today. Higher persistence indicates sustained buying/selling pressure.
@@ -485,3 +538,120 @@ def generate_fallback_close_report(all_stocks):
     report += "<b>💤 Market Status:</b>\n"
     report += "<i>The market is now closed for the weekend. Monitoring resumes Monday at market open.</i>\n"
     return report
+
+
+def generate_pre_market_summary(news_data):
+    """
+    Generates a pre-market morning briefing outlining macro trends, Fed speeches,
+    market news headlines, and recent whale/insider trades using Groq.
+    """
+    client = _get_client()
+    if not client:
+        return generate_fallback_pre_market_report(news_data)
+
+    fed_str = ""
+    if news_data.get("fed_news"):
+        for item in news_data["fed_news"]:
+            fed_str += f"- [{item['category']}] {item['title']} (<a href='{item['link']}'>Link</a>)\n"
+    else:
+        fed_str = "- No new Fed speeches or press releases in the past 24 hours.\n"
+
+    market_str = ""
+    if news_data.get("market_news"):
+        for item in news_data["market_news"]:
+            market_str += f"- {item.get('headline')} (Source: {item.get('source')}, <a href='{item.get('url')}'>Link</a>)\n"
+    else:
+        market_str = "- No general market news available.\n"
+
+    insider_str = ""
+    if news_data.get("insider_transactions"):
+        for tx in news_data["insider_transactions"]:
+            change_type = "BUY" if tx.get("change", 0) > 0 else "SELL"
+            insider_str += (
+                f"- {tx.get('symbol')}: {tx.get('name')} ({tx.get('position')}) "
+                f"{change_type} {abs(tx.get('change', 0)):,} shares at ${tx.get('sharePrice', 0):.2f} "
+                f"(Date: {tx.get('transactionDate')})\n"
+            )
+    else:
+        insider_str = "- No significant insider transactions detected recently.\n"
+
+    prompt = f"""
+You are a senior Wall Street quantitative strategist writing a morning pre-market briefing and day outlook for a professional Telegram trading channel.
+
+Today is a new trading day. Below are the key macroeconomic and corporate inputs available before the market open:
+
+=== FEDERAL RESERVE Speeches & Press Releases ===
+{fed_str}
+
+=== GENERAL MARKET NEWS & BREAKING HEADLINES ===
+{market_str}
+
+=== CRITICAL INSIDER TRANSACTION REPORTS (Form 4) ===
+{insider_str}
+
+=== REPORT REQUIREMENTS ===
+
+1. Start with: <b>☀️ WALL STREET MORNING BRIEFING</b>
+
+2. **Macro & Fed Policy Outlook**: Summarize the Fed speeches/releases and macro headlines. Explain how they might affect today's stock market open (e.g. interest rate expectations, sector shifts, yield action).
+
+3. **Strategic News Highlights**: Mention 2-3 significant general news stories that traders should watch today.
+
+4. **🐋 Insider Buy/Sell Flow**: Synthesize the insider reports. Call out any major patterns (e.g., strong executive buys in specific tickers).
+
+5. **🔮 Today's Trading Outlook**: Provide a concise day outlook forecast: Bullish Expansion, Rangebound Consolidation, Bearish Retreat, or High Volatility Warning.
+
+Keep the entire message concise, punchy, professional, and formatted in clean HTML (using <b>, <i>, <a> tags). Do not use Markdown (like **, ##, or *). Avoid table structures. Max 500 words.
+"""
+    try:
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": "You are a quantitative strategist who writes clear, professional, HTML-formatted financial briefings."},
+                {"role": "user", "content": prompt}
+            ],
+            model="llama-3.3-70b-versatile",
+            temperature=0.4,
+            max_tokens=1024
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error calling Groq for pre-market summary: {e}")
+        return generate_fallback_pre_market_report(news_data)
+
+
+def generate_fallback_pre_market_report(news_data):
+    """Fallback pre-market report when Groq is unavailable."""
+    lines = [
+        "<b>☀️ WALL STREET MORNING BRIEFING (Fallback)</b>\n",
+        "<i>Groq AI commentary unavailable. Raw briefing data below:</i>\n",
+        "<b>🔔 Federal Reserve & Macro Events:</b>"
+    ]
+    
+    if news_data.get("fed_news"):
+        for item in news_data["fed_news"]:
+            lines.append(f"- <b>{item['category']}</b>: <a href='{item['link']}'>{item['title']}</a>")
+    else:
+        lines.append("- No recent Fed updates.")
+        
+    lines.append("\n<b>📰 General Market Headlines:</b>")
+    if news_data.get("market_news"):
+        for item in news_data["market_news"][:5]:
+            url = item.get("url", "#")
+            headline = item.get("headline", "No Title")
+            source = item.get("source", "Market")
+            lines.append(f"- <a href='{url}'>{headline}</a> (<i>{source}</i>)")
+    else:
+        lines.append("- No general headlines available.")
+        
+    lines.append("\n<b>🐋 Insider Flows (Form 4):</b>")
+    if news_data.get("insider_transactions"):
+        for tx in news_data["insider_transactions"][:5]:
+            change_type = "BUY" if tx.get("change", 0) > 0 else "SELL"
+            lines.append(
+                f"- <b>{tx.get('symbol')}</b>: {tx.get('name')} {change_type} "
+                f"{abs(tx.get('change', 0)):,} shares @ ${tx.get('sharePrice', 0):.2f}"
+            )
+    else:
+        lines.append("- No significant insider trades.")
+        
+    return "\n".join(lines)
