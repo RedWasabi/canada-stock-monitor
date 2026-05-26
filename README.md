@@ -13,7 +13,7 @@ The bot is designed to run entirely within **GitHub Actions** triggered by a cro
 3. **Data Retrieval**: High-precision intraday and historical data are fetched via `yfinance` for US tickers.
 4. **State Storage**: The script reads/writes the 15-minute state (price/volume snapshots) from/to a secret **GitHub Gist** via the GitHub API.
 5. **Core Filtering & Technical Analysis Logic**:
-   - **Liquidity Filter**: Confirms average 20-day volume is $\ge 1,500,000$ (with source-level pre-filtering of stocks from TradingView).
+   - **Liquidity Filter**: Confirms average 20-day volume is $\ge 5,000,000$ (with source-level pre-filtering of stocks from TradingView).
    - **Volume Ratio**: Current volume compared to the 20-period volume moving average.
    - **14-day Wilder's RSI**: Calculates overbought ($\ge 70$) and oversold ($\le 30$) conditions.
    - **Bollinger Bands**: Detects price breakouts (Upper BB) and breakdowns (Lower BB) with volume validation.
