@@ -167,7 +167,7 @@ def calculate_trend_metrics(ticker, snapshot_history):
     }
 
 
-def analyze_stocks(tickers, snapshot_history=None):
+def analyze_stocks(tickers, snapshot_history=None, is_watchlist=False):
     """
     Downloads 90 days of OHLCV data for the given tickers in rate-limit-safe chunks,
     then computes technical indicators and returns:
@@ -267,8 +267,8 @@ def analyze_stocks(tickers, snapshot_history=None):
                 vol_hist_20 = volume_history.iloc[:-1]
             avg_volume_20 = float(vol_hist_20.mean())
 
-            # Liquidity filter: drop stocks with avg daily volume < 10,000,000 shares
-            if avg_volume_20 < 10_000_000:
+            # Liquidity filter: drop stocks with avg daily volume < 10,000,000 shares (skip for watchlist)
+            if not is_watchlist and avg_volume_20 < 10_000_000:
                 continue
 
             vol_ratio   = today_volume / avg_volume_20 if avg_volume_20 > 0 else 0.0

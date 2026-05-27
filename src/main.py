@@ -3,6 +3,7 @@ import sys
 import time
 import argparse
 import pytz
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -12,7 +13,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from gist_store import load_state, save_state
-from fetch_tickers import fetch_live_signals
+from fetch_tickers import fetch_live_signals, fetch_watchlist_live_data
 from analyze_market import analyze_stocks
 from generate_commentary import generate_report, generate_weekly_summary, generate_daily_close_summary
 from send_telegram import send_telegram_message
@@ -68,12 +69,25 @@ def main():
     print("--------------------------------------------------")
     print(f"Bot triggered at: {datetime.now(ET).strftime('%Y-%m-%d %H:%M:%S ET')}")
 
+    # ── Load Watchlist Tickers ────────────────────────────────────────────────
+    watchlist_path = os.path.join("data", "watchlist.json")
+    watchlist_tickers = []
+    if os.path.exists(watchlist_path):
+        try:
+            with open(watchlist_path, "r") as f:
+                watchlist_tickers = json.load(f)
+            print(f"Loaded {len(watchlist_tickers)} tickers from watchlist.json")
+        except Exception as e:
+            print(f"Error reading watchlist.json: {e}")
+
     # Load persistent state from Gist or local fallback early
     state = load_state(gist_id, pat)
 
-    # Initialize snapshot history if not present
+    # Initialize snapshot histories if not present
     if "snapshot_history" not in state:
         state["snapshot_history"] = []
+    if "watchlist_snapshot_history" not in state:
+        state["watchlist_snapshot_history"] = []
 
     # ── 1. Market Hours State Machine ─────────────────────────────────────────
     market_state = get_market_state()
@@ -109,10 +123,10 @@ def main():
                 market_news = fetch_market_news(finnhub_key)
                 
                 print("Fetching insider transactions for priority tickers...")
-                priority_tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+                priority_tickers = watchlist_tickers if watchlist_tickers else ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
                 insider_txs = []
                 if finnhub_key:
-                    for ticker in priority_tickers:
+                    for ticker in priority_tickers[:10]: # Limit to top 10 tickers to avoid rate limiting
                         txs = fetch_insider_transactions(ticker, finnhub_key, days_back=7)
                         insider_txs.extend(txs)
                         time.sleep(0.5)
@@ -130,6 +144,7 @@ def main():
                 if success:
                     state["last_pre_market_summary_date"] = today
                     state["snapshot_history"] = []  # Clear snapshots to start fresh at market open
+                    state["watchlist_snapshot_history"] = []
                     print("Pre-market summary sent and date recorded.")
                 else:
                     print("Failed to send pre-market summary — will retry on next dispatch.")
@@ -154,16 +169,31 @@ def main():
 
         # First run after market close today — send close summary
         print("Market just closed. Sending close/weekly summary...")
-        live_signals = fetch_live_signals()
-        tickers = list(live_signals.keys())
+        
+        mode = state.get("mode", "alternate")
+        use_watchlist_close = (mode == "watchlist" or (mode == "alternate" and watchlist_tickers))
+        
+        if use_watchlist_close:
+            tickers = watchlist_tickers
+            snap_history = state.get("watchlist_snapshot_history", [])
+            is_wl = True
+            print("Using watchlist tickers for market close summary.")
+        else:
+            live_signals = fetch_live_signals()
+            tickers = list(live_signals.keys())
+            snap_history = state.get("snapshot_history", [])
+            is_wl = False
+            print("Using general signal tickers for market close summary.")
 
         if args.test_run:
             tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+            is_wl = False
 
         # Pass snapshot history to include trend metrics in close report
         processed_stocks, anomalies, insufficient_stocks = analyze_stocks(
             tickers, 
-            snapshot_history=state.get("snapshot_history", [])
+            snapshot_history=snap_history,
+            is_watchlist=is_wl
         )
         processed_stocks = sorted(processed_stocks, key=lambda x: x["vol_ratio"], reverse=True)
 
@@ -206,6 +236,7 @@ def main():
             state["last_close_summary_date"] = today
             # Clear history after sending close report
             state["snapshot_history"] = []
+            state["watchlist_snapshot_history"] = []
             print("Close summary sent and date recorded. History cleared.")
         else:
             print("Failed to send close summary — will retry on next run.")
@@ -231,6 +262,17 @@ def main():
     history.append(new_snapshot)
     state["snapshot_history"] = history[-5:]
     
+    # Fetch watchlist signals if configured
+    if watchlist_tickers:
+        watchlist_signals = fetch_watchlist_live_data(watchlist_tickers)
+        new_wl_snapshot = {
+            "timestamp": current_timestamp,
+            "data": watchlist_signals
+        }
+        wl_history = state.get("watchlist_snapshot_history", [])
+        wl_history.append(new_wl_snapshot)
+        state["watchlist_snapshot_history"] = wl_history[-5:]
+        
     # Check if it's time to send the hourly Telegram report
     last_report_time    = state.get("last_report_time", 0)
     time_since_report   = current_timestamp - last_report_time
@@ -248,22 +290,49 @@ def main():
     # ── 5. Hourly Report Generation ───────────────────────────────────────────
     print("Time to report. Downloading price history and analyzing accumulated signals...")
 
-    # Get the union of all tickers that appeared in any snapshot in the last hour
-    union_tickers = set()
-    for snap in state["snapshot_history"]:
-        union_tickers.update(snap.get("data", {}).keys())
-    union_tickers = list(union_tickers)
+    # Determine report type (watchlist, signal, or alternate)
+    mode = state.get("mode", "alternate")
+    if mode == "watchlist":
+        report_type = "watchlist"
+    elif mode == "signal":
+        report_type = "signal"
+    else:  # alternate
+        last_type = state.get("last_report_type", "signal")
+        report_type = "watchlist" if last_type == "signal" else "signal"
+        if report_type == "watchlist" and not watchlist_tickers:
+            report_type = "signal"
+
+    print(f"Determined report type: {report_type.upper()}")
+
+    # Setup parameters based on report type
+    if report_type == "watchlist":
+        tickers = watchlist_tickers
+        snap_history = state.get("watchlist_snapshot_history", [])
+        is_wl = True
+        title_prefix = "📋 <b>WATCHLIST REPORT</b>\n\n"
+    else:
+        # Get the union of all tickers that appeared in any snapshot in the last hour
+        union_tickers = set()
+        for snap in state["snapshot_history"]:
+            union_tickers.update(snap.get("data", {}).keys())
+        tickers = list(union_tickers)
+        snap_history = state.get("snapshot_history", [])
+        is_wl = False
+        title_prefix = ""
 
     if args.test_run:
-        union_tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
-        print(f"TEST MODE — using tickers: {union_tickers}")
+        tickers = ["AAPL", "MSFT", "TSLA", "NVDA", "AMZN"]
+        snap_history = state.get("snapshot_history", [])
+        is_wl = False
+        title_prefix = ""
 
-    print(f"Analyzing a total of {len(union_tickers)} unique tickers from history...")
+    print(f"Analyzing a total of {len(tickers)} unique tickers from history...")
 
     # Run yfinance analysis using accumulated snapshot history for trend metrics
     processed_stocks, anomalies, insufficient_stocks = analyze_stocks(
-        union_tickers, 
-        snapshot_history=state["snapshot_history"]
+        tickers, 
+        snapshot_history=snap_history,
+        is_watchlist=is_wl
     )
     print(f"Analysis complete. {len(processed_stocks)} stocks passed the liquidity filter.")
 
@@ -282,7 +351,7 @@ def main():
     print("Generating Groq commentary...")
     if not top_20:
         report_text = (
-            "<b>📊 US MARKET SIGNAL REPORT</b>\n\n"
+            f"{title_prefix}<b>📊 US MARKET SIGNAL REPORT</b>\n\n"
             "No stocks passed all filters this hour."
         )
     else:
@@ -310,15 +379,20 @@ def main():
                 "ticker_news": ticker_news,
                 "insider_transactions": insider_txs
             }
-        report_text = generate_report(top_20, anomalies, insufficient_stocks, news_data=news_data)
+        raw_report = generate_report(top_20, anomalies, insufficient_stocks, news_data=news_data)
+        report_text = title_prefix + raw_report
 
     print("Sending report to Telegram...")
     success = send_telegram_message(report_text)
 
     if success:
         state["last_report_time"] = current_timestamp
-        # Clear snapshot history to start fresh for the next hour
-        state["snapshot_history"] = []
+        state["last_report_type"] = report_type
+        # Clear corresponding snapshot history to start fresh for the next hour
+        if report_type == "watchlist":
+            state["watchlist_snapshot_history"] = []
+        else:
+            state["snapshot_history"] = []
         print("Telegram report sent. Timer reset. History cleared.")
     else:
         print("Failed to send report — will retry on next run.")

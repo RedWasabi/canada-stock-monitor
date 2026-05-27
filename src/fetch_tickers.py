@@ -113,3 +113,85 @@ def fetch_active_tickers():
     Returns only the list of tickers (backward compatibility).
     """
     return list(fetch_live_signals().keys())
+
+
+def fetch_watchlist_live_data(watchlist_tickers):
+    """
+    Downloads recent data for the watchlist tickers using yfinance
+    and computes the metrics needed for snapshots.
+    """
+    import yfinance as yf
+    import pandas as pd
+    import numpy as np
+    
+    print(f"Fetching live stats for {len(watchlist_tickers)} watchlist tickers...")
+    try:
+        data = yf.download(
+            watchlist_tickers,
+            period="30d",
+            interval="1d",
+            group_by="ticker",
+            auto_adjust=True,
+            progress=False,
+            threads=True
+        )
+        
+        has_multi = isinstance(data.columns, pd.MultiIndex)
+        results = {}
+        
+        for ticker in watchlist_tickers:
+            try:
+                if has_multi:
+                    if ticker not in data.columns.get_level_values(0):
+                        continue
+                    df = data[ticker].copy()
+                else:
+                    df = data.copy()
+                    
+                df = df.dropna(subset=["Close"])
+                if len(df) < 2:
+                    continue
+                    
+                close_history = df["Close"]
+                volume_history = df.get("Volume", pd.Series(dtype=float))
+                
+                today_close = float(close_history.iloc[-1])
+                prev_close = float(close_history.iloc[-2])
+                pct_change = ((today_close - prev_close) / prev_close) * 100.0 if prev_close != 0 else 0.0
+                
+                # Volume ratio calculation
+                vol_ratio = 1.0
+                if not volume_history.empty and len(volume_history) >= 2:
+                    today_vol = float(volume_history.iloc[-1])
+                    avg_vol = float(volume_history.iloc[-21:-1].mean()) if len(volume_history) >= 21 else float(volume_history.iloc[:-1].mean())
+                    if avg_vol > 0:
+                        vol_ratio = today_vol / avg_vol
+                        
+                # Quick RSI calculation
+                rsi_val = 50.0
+                if len(close_history) >= 15:
+                    delta = close_history.diff()
+                    gain = delta.clip(lower=0)
+                    loss = -delta.clip(upper=0)
+                    avg_gain = gain.iloc[-15:-1].mean()
+                    avg_loss = loss.iloc[-15:-1].mean()
+                    if avg_loss > 0:
+                        rs = avg_gain / avg_loss
+                        rsi_val = 100.0 - (100.0 / (1.0 + rs))
+                    elif avg_gain > 0:
+                        rsi_val = 100.0
+                        
+                results[ticker] = {
+                    "close": today_close,
+                    "pct_change": pct_change,
+                    "vol_ratio": vol_ratio,
+                    "rsi": rsi_val
+                }
+            except Exception as e:
+                print(f"Error processing live stats for {ticker}: {e}")
+                continue
+                
+        return results
+    except Exception as e:
+        print(f"Error downloading live stats for watchlist: {e}")
+        return {}
