@@ -273,13 +273,30 @@ def main():
         wl_history.append(new_wl_snapshot)
         state["watchlist_snapshot_history"] = wl_history[-5:]
         
-    # Check if it's time to send the hourly Telegram report
+    # Determine nominal 30-minute slot based on current Eastern Time
+    now_et = datetime.now(ET)
+    
+    if now_et.minute >= 45:
+        from datetime import timedelta
+        dt_rounded = now_et + timedelta(minutes=(60 - now_et.minute))
+        slot_str = dt_rounded.strftime("%Y-%m-%d %H:00")
+        slot_type = "on_the_hour"
+    elif now_et.minute < 15:
+        slot_str = now_et.strftime("%Y-%m-%d %H:00")
+        slot_type = "on_the_hour"
+    else:
+        slot_str = now_et.strftime("%Y-%m-%d %H:30")
+        slot_type = "on_the_half_hour"
+
     last_report_time    = state.get("last_report_time", 0)
     time_since_report   = current_timestamp - last_report_time
-    # 3300 seconds = 55 minutes
-    is_report_time = time_since_report >= 3300 or args.force_report
+    
+    # We report if we enter a new slot and it's been at least 20 minutes (1200s) since the last report, OR if report is forced
+    is_new_slot = slot_str != state.get("last_report_slot", "")
+    is_report_time = (is_new_slot and time_since_report >= 1200) or args.force_report
 
-    print(f"Accumulated {len(state['snapshot_history'])} snapshots. Time since last report: {time_since_report / 60:.1f} minutes.")
+    print(f"Nominal Slot: {slot_str} ({slot_type.replace('_', ' ')}). Time since last report: {time_since_report / 60:.1f} minutes.")
+    print(f"Accumulated {len(state['snapshot_history'])} general snapshots and {len(state['watchlist_snapshot_history'])} watchlist snapshots.")
 
     if not is_report_time:
         print("Not yet time to report. Snapshot accumulated. Saving state and exiting fast.")
@@ -287,7 +304,7 @@ def main():
         print("--------------------------------------------------")
         sys.exit(0)
 
-    # ── 5. Hourly Report Generation ───────────────────────────────────────────
+    # ── 5. 30-Minute Report Generation ────────────────────────────────────────
     print("Time to report. Downloading price history and analyzing accumulated signals...")
 
     # Determine report type (watchlist, signal, or alternate)
@@ -297,8 +314,11 @@ def main():
     elif mode == "signal":
         report_type = "signal"
     else:  # alternate
-        last_type = state.get("last_report_type", "signal")
-        report_type = "watchlist" if last_type == "signal" else "signal"
+        if slot_type == "on_the_hour":
+            report_type = "signal"
+        else:
+            report_type = "watchlist"
+            
         if report_type == "watchlist" and not watchlist_tickers:
             report_type = "signal"
 
@@ -387,8 +407,9 @@ def main():
 
     if success:
         state["last_report_time"] = current_timestamp
+        state["last_report_slot"] = slot_str
         state["last_report_type"] = report_type
-        # Clear corresponding snapshot history to start fresh for the next hour
+        # Clear corresponding snapshot history to start fresh for the next 30 minutes
         if report_type == "watchlist":
             state["watchlist_snapshot_history"] = []
         else:
