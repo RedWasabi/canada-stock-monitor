@@ -100,6 +100,20 @@ def fetch_market_news(api_key):
         print(f"Error fetching Finnhub general news: {e}")
         return []
 
+def clean_ticker_for_news(ticker):
+    """
+    Cleans/maps TSX CDR tickers to their main US or international symbols
+    for querying news and insider transactions on Finnhub.
+    """
+    mapping = {
+        "BMW.TO": "BMWYY",  # BMW ADR
+        "IBM.TO": "IBM",
+        "COST.TO": "COST",
+        "GIB-A.TO": "GIB"
+    }
+    return mapping.get(ticker, ticker)
+
+
 def fetch_ticker_news(ticker, api_key, days_back=1):
     """
     Fetches stock-specific news headlines from Finnhub.
@@ -107,12 +121,13 @@ def fetch_ticker_news(ticker, api_key, days_back=1):
     if not api_key:
         return []
     
+    query_ticker = clean_ticker_for_news(ticker)
     now_dt = datetime.now(ET_TZ)
     start_dt = now_dt - timedelta(days=days_back)
     
     url = "https://finnhub.io/api/v1/company-news"
     params = {
-        "symbol": ticker,
+        "symbol": query_ticker,
         "from": start_dt.strftime("%Y-%m-%d"),
         "to": now_dt.strftime("%Y-%m-%d"),
         "token": api_key
@@ -123,10 +138,10 @@ def fetch_ticker_news(ticker, api_key, days_back=1):
         if response.status_code == 200:
             return response.json()[:3]
         else:
-            print(f"Finnhub company news failed for {ticker}: HTTP {response.status_code}")
+            print(f"Finnhub company news failed for {ticker} (queried as {query_ticker}): HTTP {response.status_code}")
             return []
     except Exception as e:
-        print(f"Error fetching Finnhub company news for {ticker}: {e}")
+        print(f"Error fetching Finnhub company news for {ticker} (queried as {query_ticker}): {e}")
         return []
 
 def fetch_insider_transactions(ticker, api_key, days_back=14):
@@ -136,12 +151,13 @@ def fetch_insider_transactions(ticker, api_key, days_back=14):
     if not api_key:
         return []
     
+    query_ticker = clean_ticker_for_news(ticker)
     url = "https://finnhub.io/api/v1/stock/insider-transactions"
     now_dt = datetime.now(ET_TZ)
     start_dt = now_dt - timedelta(days=days_back)
     
     params = {
-        "symbol": ticker,
+        "symbol": query_ticker,
         "from": start_dt.strftime("%Y-%m-%d"),
         "to": now_dt.strftime("%Y-%m-%d"),
         "token": api_key
@@ -156,11 +172,12 @@ def fetch_insider_transactions(ticker, api_key, days_back=14):
                 change = abs(tx.get("change", 0))
                 # Only include transactions of 1,000 shares or more
                 if change >= 1000:
+                    tx["symbol"] = ticker  # Overwrite with original ticker to ensure matches in reports
                     significant.append(tx)
             return significant[:5]
         else:
-            print(f"Finnhub insider transactions failed for {ticker}: HTTP {response.status_code}")
+            print(f"Finnhub insider transactions failed for {ticker} (queried as {query_ticker}): HTTP {response.status_code}")
             return []
     except Exception as e:
-        print(f"Error fetching insider transactions for {ticker}: {e}")
+        print(f"Error fetching insider transactions for {ticker} (queried as {query_ticker}): {e}")
         return []
